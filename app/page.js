@@ -1,16 +1,35 @@
 "use client";
 import { useMemo, useState } from "react";
 function Score({value}){return <span className="scoreNum">{value}<small>/10</small></span>}
+
+async function readApiResponse(response){
+  const raw = await response.text();
+  if(!raw.trim()){
+    throw new Error("Veritas API returned an empty response (HTTP "+response.status+"). Check the Vercel Function logs and confirm the latest deployment is ready.");
+  }
+  let payload;
+  try { payload = JSON.parse(raw); }
+  catch {
+    const hint = raw.replace(/<[^>]*>/g," ").replace(/\s+/g," ").trim().slice(0,180);
+    throw new Error("The server returned a non-JSON response (HTTP "+response.status+"). "+(hint || "The response body could not be read."));
+  }
+  if(!response.ok) throw new Error(payload?.error || "Verification failed (HTTP "+response.status+").");
+  return payload;
+}
+
 export default function Home(){
  const[name,setName]=useState(""),[urls,setUrls]=useState(""),[notes,setNotes]=useState(""),[file,setFile]=useState(null),[result,setResult]=useState(null),[status,setStatus]=useState(""),[loading,setLoading]=useState(false);
  const urlCount=useMemo(()=>urls.split(/\s+/).filter(Boolean).length,[urls]);
  async function analyze(){
   if(!name.trim()&&!urls.trim()&&!notes.trim()&&!file){setStatus("Add a candidate name, a URL, notes, or a file first.");return}
   setLoading(true);setResult(null);setStatus("Veritas is collecting available evidence and building the review...");
-  try{const fd=new FormData();fd.append("name",name);fd.append("urls",urls);fd.append("notes",notes);if(file)fd.append("file",file);
-   const res=await fetch("/api/analyze",{method:"POST",body:fd});const data=await res.json();if(!res.ok)throw new Error(data.error||"Analysis failed.");
-   setResult(data.result);setStatus("Completed. "+(data.sourcesChecked||0)+" supplied URL reference(s) were considered.");
-  }catch(e){setStatus(e.message||"Something went wrong.")}finally{setLoading(false)}
+  try{
+   const fd=new FormData();fd.append("name",name);fd.append("urls",urls);fd.append("notes",notes);if(file)fd.append("file",file);
+   const response=await fetch("/api/analyze",{method:"POST",body:fd,headers:{"Accept":"application/json"}});
+   const data=await readApiResponse(response);
+   if(!data?.result) throw new Error("The analysis service returned no report. Please retry; check the Vercel Function logs if this continues.");
+   setResult(data.result);setStatus("Completed with "+(data.modelUsed||"Gemini")+". "+(data.sourcesChecked||0)+" supplied URL reference(s) were counted (not necessarily opened).");
+  }catch(e){setStatus(e instanceof Error?e.message:"Something went wrong while analyzing this candidate.")}finally{setLoading(false)}
  }
  function clearAll(){setName("");setUrls("");setNotes("");setFile(null);setResult(null);setStatus("")}
  return <div className="shell"><header className="topbar"><div className="brand"><div className="mark">V</div>VERITAS</div><div className="badge">AI-native verification workspace</div></header>
@@ -21,7 +40,7 @@ export default function Home(){
  <div className="field"><label className="label">Additional context</label><textarea className="textarea" value={notes} onChange={e=>setNotes(e.target.value)} placeholder="Role, claims to verify, dates, concerns, interview notes..."/></div>
  <div className="field"><label className="label">Import file</label><div className="drop"><label htmlFor="file">{file?<><b>{file.name}</b><div className="fileName">Ready for analysis</div></>:<>Drop or choose a PDF, XLSX, CSV, TXT, MD or JSON file<br/><span className="fileName">Candidate sheets are supported</span></>}</label><input id="file" type="file" accept=".pdf,.xlsx,.xls,.csv,.txt,.md,.json" onChange={e=>setFile(e.target.files?.[0]||null)}/></div></div>
  <div className="actions"><button className="primary" onClick={analyze} disabled={loading}>{loading?"Analyzing…":"Run verification"}</button><button className="secondary" onClick={clearAll} disabled={loading}>Clear</button></div>
- {status&&<div className="status">{status}</div>}<div className="disclaimer">For employment decisions, treat Veritas as decision support. Public-web signals can be incomplete, stale, wrong or unrelated to the person. Do not use protected characteristics or sensitive personal information as a hiring criterion.</div>
+ {status&&<div className="status" role="status">{status}</div>}<div className="disclaimer">For employment decisions, treat Veritas as decision support. Public-web signals can be incomplete, stale, wrong or unrelated to the person. Do not use protected characteristics or sensitive personal information as a hiring criterion.</div>
  </div></div>
  <div className="panel result"><div className="panelHead"><h2>Verification review</h2><span className="badge">Live report</span></div>{result?<Report result={result}/>:<div className="empty"><div><div className="emptyIcon">✦</div><b>No verification yet</b><p>Give Veritas a candidate and it will produce a structured review here.</p></div></div>}</div>
  </section></main></div>
