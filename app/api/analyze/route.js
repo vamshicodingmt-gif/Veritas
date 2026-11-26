@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import pdfParse from "pdf-parse";
+import { extractText, getDocumentProxy } from "unpdf";
 import * as XLSX from "xlsx";
 
 export const runtime = "nodejs";
@@ -36,10 +36,13 @@ async function extractFile(file) {
   const buffer = Buffer.from(await file.arrayBuffer());
 
   if (name.endsWith(".pdf")) {
-    // pdf-parse v1 uses the Node-compatible PDF.js legacy build. The v2 line
-    // evaluated DOMMatrix at module load and crashed on Vercel Node runtimes.
-    const parsed = await pdfParse(buffer);
-    return String(parsed.text || "").slice(0, 50000);
+    const pdf = await getDocumentProxy(new Uint8Array(buffer));
+    try {
+      const parsed = await extractText(pdf, { mergePages: true });
+      return String(parsed.text || "").slice(0, 50000);
+    } finally {
+      await pdf.destroy();
+    }
   }
 
   if (name.endsWith(".xlsx") || name.endsWith(".xls")) {
