@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { PDFParse } from "pdf-parse";
+import pdfParse from "pdf-parse";
 import * as XLSX from "xlsx";
 
 export const runtime = "nodejs";
@@ -11,25 +11,13 @@ const MODELS = [...new Set([PRIMARY_MODEL, "gemini-3.8-flash", "gemini-3.5-flash
 const schema = {
   type: "object",
   properties: {
-    overallScore: { type: "number" },
-    skillsScore: { type: "number" },
-    reliabilityScore: { type: "number" },
-    behaviorScore: { type: "number" },
-    verdict: { type: "string" },
-    confidence: { type: "string" },
-    summary: { type: "string" },
-    signals: {
-      type: "array",
-      items: {
-        type: "object",
-        properties: {
-          title: { type: "string" },
-          detail: { type: "string" },
-          severity: { type: "string", enum: ["clear", "mixed", "concerning"] }
-        },
-        required: ["title", "detail", "severity"]
-      }
-    },
+    overallScore: { type: "number" }, skillsScore: { type: "number" },
+    reliabilityScore: { type: "number" }, behaviorScore: { type: "number" },
+    verdict: { type: "string" }, confidence: { type: "string" }, summary: { type: "string" },
+    signals: { type: "array", items: { type: "object", properties: {
+      title: { type: "string" }, detail: { type: "string" },
+      severity: { type: "string", enum: ["clear", "mixed", "concerning"] }
+    }, required: ["title", "detail", "severity"] } },
     claimsToVerify: { type: "array", items: { type: "string" } },
     positiveEvidence: { type: "array", items: { type: "string" } },
     decisionNotes: { type: "string" }
@@ -48,13 +36,10 @@ async function extractFile(file) {
   const buffer = Buffer.from(await file.arrayBuffer());
 
   if (name.endsWith(".pdf")) {
-    const parser = new PDFParse({ data: buffer });
-    try {
-      const output = await parser.getText();
-      return output.text.slice(0, 50000);
-    } finally {
-      await parser.destroy();
-    }
+    // pdf-parse v1 uses the Node-compatible PDF.js legacy build. The v2 line
+    // evaluated DOMMatrix at module load and crashed on Vercel Node runtimes.
+    const parsed = await pdfParse(buffer);
+    return String(parsed.text || "").slice(0, 50000);
   }
 
   if (name.endsWith(".xlsx") || name.endsWith(".xls")) {
@@ -87,20 +72,12 @@ Return the structured review. The score is decision-support only, not a hiring d
 
 async function readProviderJson(response, model) {
   const raw = await response.text();
-  if (!raw.trim()) {
-    throw new Error("Gemini model " + model + " returned an empty HTTP " + response.status + " response.");
-  }
-
+  if (!raw.trim()) throw new Error("Gemini model " + model + " returned an empty HTTP " + response.status + " response.");
   let payload;
-  try {
-    payload = JSON.parse(raw);
-  } catch {
-    throw new Error("Gemini model " + model + " returned a non-JSON HTTP " + response.status + " response: " + raw.slice(0, 240));
-  }
-
+  try { payload = JSON.parse(raw); }
+  catch { throw new Error("Gemini model " + model + " returned non-JSON HTTP " + response.status + ": " + raw.slice(0, 240)); }
   if (!response.ok) {
-    const providerMessage = payload?.error?.message || payload?.message || "Unknown Gemini API error";
-    throw new Error("Gemini " + model + " (HTTP " + response.status + "): " + providerMessage);
+    throw new Error("Gemini " + model + " (HTTP " + response.status + "): " + (payload?.error?.message || payload?.message || "Unknown provider error"));
   }
   return payload;
 }
@@ -116,32 +93,18 @@ async function callGemini(prompt, model) {
       maxOutputTokens: 5000
     }
   };
-
   const response = await fetch(
     "https://generativelanguage.googleapis.com/v1beta/models/" + model + ":generateContent",
-    {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        "x-goog-api-key": process.env.GEMINI_API_KEY
-      },
-      body: JSON.stringify(body),
-      cache: "no-store"
-    }
+    { method: "POST", headers: { "content-type": "application/json", "x-goog-api-key": process.env.GEMINI_API_KEY },
+      body: JSON.stringify(body), cache: "no-store" }
   );
-
   const payload = await readProviderJson(response, model);
   const responseText = payload?.candidates?.[0]?.content?.parts?.map(part => part.text || "").join("") || "";
   if (!responseText.trim()) {
-    const reason = payload?.candidates?.[0]?.finishReason || "No candidate text returned";
-    throw new Error("Gemini model " + model + " produced no JSON report (" + reason + ").");
+    throw new Error("Gemini model " + model + " returned no report (" + (payload?.candidates?.[0]?.finishReason || "no candidate text") + ").");
   }
-
-  try {
-    return JSON.parse(responseText);
-  } catch {
-    throw new Error("Gemini model " + model + " returned malformed report JSON: " + responseText.slice(0, 240));
-  }
+  try { return JSON.parse(responseText); }
+  catch { throw new Error("Gemini model " + model + " returned malformed report JSON: " + responseText.slice(0, 240)); }
 }
 
 export async function POST(request) {
@@ -149,7 +112,6 @@ export async function POST(request) {
     if (!process.env.GEMINI_API_KEY) {
       return NextResponse.json({ error: "GEMINI_API_KEY is not configured in this deployment." }, { status: 500 });
     }
-
     const form = await request.formData();
     const name = String(form.get("name") || "");
     const urls = String(form.get("urls") || "");
@@ -163,31 +125,19 @@ export async function POST(request) {
 
     const prompt = buildPrompt({ name, urls, notes, fileText });
     const failures = [];
-
     for (const model of MODELS) {
       try {
         const result = await callGemini(prompt, model);
-        for (const key of ["overallScore", "skillsScore", "reliabilityScore", "behaviorScore"]) {
-          result[key] = clamp(result[key]);
-        }
-        return NextResponse.json({
-          result,
-          modelUsed: model,
-          sourcesChecked: urls.split(/\s+/).filter(Boolean).length
-        });
+        for (const key of ["overallScore", "skillsScore", "reliabilityScore", "behaviorScore"]) result[key] = clamp(result[key]);
+        return NextResponse.json({ result, modelUsed: model, sourcesChecked: urls.split(/\s+/).filter(Boolean).length });
       } catch (error) {
         failures.push(model + ": " + (error instanceof Error ? error.message : String(error)));
       }
     }
-
     console.error("All Veritas Gemini models failed:", failures);
-    return NextResponse.json({
-      error: "All Gemini model attempts failed. " + failures.join(" | ")
-    }, { status: 502 });
+    return NextResponse.json({ error: "All Gemini model attempts failed. " + failures.join(" | ") }, { status: 502 });
   } catch (error) {
     console.error("Veritas analysis error:", error);
-    return NextResponse.json({
-      error: error instanceof Error ? error.message : "Unable to complete verification."
-    }, { status: 500 });
+    return NextResponse.json({ error: error instanceof Error ? error.message : "Unable to complete verification." }, { status: 500 });
   }
 }
